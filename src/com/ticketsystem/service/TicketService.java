@@ -37,6 +37,9 @@ public class TicketService {
     }
 
     public Ticket createTicket(int customerId, String title, String description, Priority priority) {
+        if (title == null || title.isBlank()) {
+            throw new IllegalArgumentException("Ticket title cannot be empty");
+        }
         Customer customer = userRepository.findCustomerById(customerId)
                 .orElseThrow(() -> new UserNotFoundException("Customer", customerId));
 

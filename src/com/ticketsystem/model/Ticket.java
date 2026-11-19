@@ -72,6 +72,14 @@ public class Ticket {
         return assignedAgent;
     }
 
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public LocalDateTime getUpdatedAt() {
+        return updatedAt;
+    }
+
     @Override
     public String toString() {
         String agentName = (assignedAgent == null) ? "unassigned" : assignedAgent.getName();

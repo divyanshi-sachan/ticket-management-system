@@ -1,144 +1,157 @@
 package com.ticketsystem.cli;
 
+import com.ticketsystem.model.Customer;
 import com.ticketsystem.model.Priority;
 import com.ticketsystem.model.Ticket;
 import com.ticketsystem.model.TicketStatus;
 import com.ticketsystem.service.TicketService;
 import com.ticketsystem.service.UserService;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Scanner;
 
-/** Only handles reading input and printing output. No business rules here. */
+/**
+ * Controls the flow of the app: show menu, ask questions, call services.
+ * No business rules here (services) and no formatting here (ConsoleView).
+ */
 public class ConsoleApp {
+
+    private enum MenuOption {
+        CREATE_TICKET("Create ticket"),
+        UPDATE_STATUS("Update ticket status"),
+        VIEW_ALL_TICKETS("View all tickets"),
+        VIEW_TICKET("View ticket details"),
+        VIEW_AGENT_TICKETS("View tickets of an agent"),
+        LIST_USERS("List customers and agents"),
+        ADD_AGENT("Add agent"),
+        ADD_CUSTOMER("Add customer"),
+        EXIT("Exit");
+
+        private final String label;
+
+        MenuOption(String label) {
+            this.label = label;
+        }
+    }
+
     private final TicketService ticketService;
     private final UserService userService;
-    private final Scanner scanner = new Scanner(System.in);
+    private final InputReader input;
+    private final MenuSelector menu;
+    private final ConsoleView view;
 
-    public ConsoleApp(TicketService ticketService, UserService userService) {
+    public ConsoleApp(TicketService ticketService, UserService userService,
+                      InputReader input, MenuSelector menu, ConsoleView view) {
         this.ticketService = ticketService;
         this.userService = userService;
+        this.input = input;
+        this.menu = menu;
+        this.view = view;
     }
 
     public void start() {
-        System.out.println("=== Ticket Management System ===");
+        view.printBanner();
         boolean running = true;
         while (running) {
-            printMenu();
-            int choice = readInt("Choose an option: ");
             try {
-                switch (choice) {
-                    case 1 -> createTicket();
-                    case 2 -> updateTicketStatus();
-                    case 3 -> printTickets(ticketService.getAllTickets());
-                    case 4 -> viewAgentTickets();
-                    case 5 -> listUsers();
-                    case 6 -> addAgent();
-                    case 7 -> addCustomer();
-                    case 0 -> running = false;
-                    default -> System.out.println("Invalid option, try again.");
+                System.out.println();
+                MenuOption option = choose("MAIN MENU", Arrays.asList(MenuOption.values()), o -> o.label);
+                switch (option) {
+                    case CREATE_TICKET -> createTicket();
+                    case UPDATE_STATUS -> updateTicketStatus();
+                    case VIEW_ALL_TICKETS -> viewAllTickets();
+                    case VIEW_TICKET -> viewTicket();
+                    case VIEW_AGENT_TICKETS -> viewAgentTickets();
+                    case LIST_USERS -> listUsers();
+                    case ADD_AGENT -> addAgent();
+                    case ADD_CUSTOMER -> addCustomer();
+                    case EXIT -> running = false;
                 }
+            } catch (InputEndedException e) {
+                running = false; // Ctrl+D or end of piped input
             } catch (RuntimeException e) {
-                // every business error ends up here and is shown nicely
-                System.out.println("Error: " + e.getMessage());
+                view.error(e.getMessage()); // every business error is shown here, in one place
             }
         }
-        System.out.println("Goodbye!");
-    }
-
-    private void printMenu() {
-        System.out.println();
-        System.out.println("1. Create ticket");
-        System.out.println("2. Update ticket status");
-        System.out.println("3. View all tickets");
-        System.out.println("4. View tickets of an agent");
-        System.out.println("5. List customers and agents");
-        System.out.println("6. Add agent");
-        System.out.println("7. Add customer");
-        System.out.println("0. Exit");
+        view.info("Goodbye!");
     }
 
     private void createTicket() {
-        int customerId = readInt("Customer id: ");
-        String title = readLine("Title: ");
-        String description = readLine("Description: ");
-        Priority priority = readEnum("Priority (LOW/MEDIUM/HIGH): ", Priority.class);
+        view.heading("Create ticket");
+        int customerId = input.readInt("Customer id: ");
+        Customer customer = userService.getCustomer(customerId); // fail early, before asking more
+        view.info("Raising a ticket for " + customer.getName());
+
+        String title = input.readRequiredLine("Title: ");
+        String description = input.readLine("Description (optional): ");
+        Priority priority = choose("Priority", Arrays.asList(Priority.values()), Enum::name);
+
         Ticket ticket = ticketService.createTicket(customerId, title, description, priority);
-        System.out.println("Created: " + ticket);
+        view.success("Ticket #" + ticket.getId() + " created and assigned to " + ticket.getAssignedAgent().getName());
+        view.printTicketDetails(ticket);
     }
 
     private void updateTicketStatus() {
-        int ticketId = readInt("Ticket id: ");
+        view.heading("Update ticket status");
+        int ticketId = input.readInt("Ticket id: ");
         Ticket ticket = ticketService.getTicket(ticketId);
-        System.out.println("Current status: " + ticket.getStatus());
-        TicketStatus newStatus = readEnum("New status (OPEN/IN_PROGRESS/RESOLVED/CLOSED): ", TicketStatus.class);
-        System.out.println("Updated: " + ticketService.updateStatus(ticketId, newStatus));
+
+        // only offer moves the lifecycle allows, so the user can't pick an invalid one
+        List<TicketStatus> allowed = ticket.getStatus().nextStatuses();
+        if (allowed.isEmpty()) {
+            view.info("Ticket #" + ticketId + " is " + ticket.getStatus() + " and cannot change any more.");
+            return;
+        }
+        view.info("Ticket #" + ticketId + " is currently " + ticket.getStatus());
+        TicketStatus newStatus = choose("Move ticket #" + ticketId + " to", allowed, Enum::name);
+
+        ticketService.updateStatus(ticketId, newStatus);
+        view.success("Ticket #" + ticketId + " moved to " + newStatus);
+    }
+
+    private void viewAllTickets() {
+        view.heading("All tickets");
+        view.printTicketTable(ticketService.getAllTickets());
+    }
+
+    private void viewTicket() {
+        view.heading("Ticket details");
+        int ticketId = input.readInt("Ticket id: ");
+        view.printTicketDetails(ticketService.getTicket(ticketId));
     }
 
     private void viewAgentTickets() {
-        int agentId = readInt("Agent id: ");
-        printTickets(ticketService.getTicketsForAgent(agentId));
+        view.heading("Tickets of an agent");
+        int agentId = input.readInt("Agent id: ");
+        view.printTicketTable(ticketService.getTicketsForAgent(agentId));
     }
 
     private void listUsers() {
-        System.out.println("Customers:");
-        userService.getAllCustomers().forEach(c -> System.out.println("  " + c));
-        System.out.println("Agents:");
-        userService.getAllAgents().forEach(a -> System.out.println("  " + a));
+        view.heading("Customers and agents");
+        view.printUsers(userService.getAllCustomers(), userService.getAllAgents());
     }
 
     private void addAgent() {
-        String name = readLine("Agent name: ");
-        String email = readLine("Agent email: ");
-        System.out.println("Added: " + userService.registerAgent(name, email));
+        view.heading("Add agent");
+        String name = input.readRequiredLine("Agent name: ");
+        String email = input.readRequiredLine("Agent email: ");
+        view.success("Added " + userService.registerAgent(name, email));
     }
 
     private void addCustomer() {
-        String name = readLine("Customer name: ");
-        String email = readLine("Customer email: ");
-        System.out.println("Added: " + userService.registerCustomer(name, email));
+        view.heading("Add customer");
+        String name = input.readRequiredLine("Customer name: ");
+        String email = input.readRequiredLine("Customer email: ");
+        view.success("Added " + userService.registerCustomer(name, email));
     }
 
-    private void printTickets(List<Ticket> tickets) {
-        if (tickets.isEmpty()) {
-            System.out.println("No tickets found.");
-            return;
+    /** Turns any list of items into menu labels, asks the MenuSelector, returns the chosen item. */
+    private <T> T choose(String title, List<T> items, java.util.function.Function<T, String> toLabel) {
+        List<String> labels = new ArrayList<>();
+        for (T item : items) {
+            labels.add(toLabel.apply(item));
         }
-        tickets.forEach(System.out::println);
-    }
-
-    // ---------- small input helpers ----------
-
-    private String readLine(String prompt) {
-        System.out.print(prompt);
-        if (!scanner.hasNextLine()) {
-            return "";
-        }
-        return scanner.nextLine().trim();
-    }
-
-    private int readInt(String prompt) {
-        while (true) {
-            if (!scanner.hasNextLine()) {
-                return 0; // input closed: behave like "exit"
-            }
-            String input = readLine(prompt);
-            try {
-                return Integer.parseInt(input);
-            } catch (NumberFormatException e) {
-                System.out.println("Please enter a number.");
-            }
-        }
-    }
-
-    private <E extends Enum<E>> E readEnum(String prompt, Class<E> type) {
-        while (true) {
-            String input = readLine(prompt).toUpperCase();
-            try {
-                return Enum.valueOf(type, input);
-            } catch (IllegalArgumentException e) {
-                System.out.println("Invalid value: " + input);
-            }
-        }
+        return items.get(menu.select(title, labels));
     }
 }

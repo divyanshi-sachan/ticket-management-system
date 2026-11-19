@@ -41,9 +41,24 @@ The project is intentionally small. Its purpose is to show **Low-Level Design (L
 # compile every .java file into the out/ folder
 javac -d out $(find src -name "*.java")
 
-# run the app
+# run the app (arrow-key menus in a macOS/Linux terminal)
 java -cp out com.ticketsystem.Main
+
+# or force the simple numbered menus
+java -cp out com.ticketsystem.Main --simple
 ```
+
+**Controls**
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` (or `k` / `j`) | Move through a menu (wraps around top/bottom) |
+| `Enter` | Select the highlighted option |
+| `1`–`9` | Jump straight to that option |
+| `Ctrl+C` | Quit at any time (the terminal is restored safely) |
+
+On Windows, in IDE consoles, or when input is piped from a file, the app automatically falls back to
+**numbered menus**: type the number (or the option's name, e.g. `high`) and press Enter.
 
 The app starts with sample data so you can try it immediately:
 
@@ -59,17 +74,22 @@ The app starts with sample data so you can try it immediately:
 ## 2. Features
 
 ```
-1. Create ticket              -> auto-assigned to an agent
-2. Update ticket status       -> only valid moves are allowed
-3. View all tickets
-4. View tickets of an agent
-5. List customers and agents
-6. Add agent
-7. Add customer
-0. Exit
+MAIN MENU
+  > 1. Create ticket              -> auto-assigned to an agent
+    2. Update ticket status       -> only the valid next statuses are offered
+    3. View all tickets           -> table with colored status/priority + summary
+    4. View ticket details        -> full card incl. description and allowed moves
+    5. View tickets of an agent
+    6. List customers and agents  -> table with each agent's active workload
+    7. Add agent
+    8. Add customer
+    9. Exit
+  Up/Down to move, Enter to select, or press a number
 ```
 
-Every change to a ticket sends a notification to the customer (printed to the console).
+- Every change to a ticket sends a notification to the customer (printed to the console).
+- Input is validated: unknown ids fail **immediately**, blank titles/names are re-asked, emails need an `@`.
+- Colors are used only in a real terminal (and disabled when `NO_COLOR` is set), so piped output stays clean.
 
 ---
 
@@ -145,7 +165,7 @@ The code is split into **layers**. A layer may only call the layer below it, nev
 
 ```mermaid
 flowchart TD
-    CLI["<b>CLI layer</b><br/>ConsoleApp<br/><i>reads input, prints output</i>"]
+    CLI["<b>CLI layer</b><br/>ConsoleApp · ConsoleView · MenuSelector · InputReader<br/><i>flow, looks, choosing, reading keys</i>"]
     SVC["<b>Service layer</b><br/>TicketService, UserService<br/><i>business rules</i>"]
     INF["<b>Infrastructure layer</b><br/>Repositories · AssignmentStrategy · NotificationService<br/><i>storage, assignment rule, notifications</i>"]
     MOD["<b>Model layer</b><br/>Ticket, User, Customer, Agent, enums<br/><i>data + its own rules</i>"]
@@ -302,8 +322,41 @@ classDiagram
     class ConsoleApp {
         -TicketService ticketService
         -UserService userService
-        -Scanner scanner
+        -InputReader input
+        -MenuSelector menu
+        -ConsoleView view
         +start()
+    }
+
+    class MenuSelector {
+        <<interface>>
+        +select(String title, List~String~ options) int
+    }
+
+    class ArrowKeyMenuSelector {
+        +isSupported()$ boolean
+        +select(String title, List~String~ options) int
+    }
+
+    class NumberedMenuSelector {
+        +select(String title, List~String~ options) int
+    }
+
+    class InputReader {
+        +readByte() int
+        +readLine(String prompt) String
+        +readRequiredLine(String prompt) String
+        +readInt(String prompt) int
+    }
+
+    class ConsoleView {
+        -boolean colorsEnabled
+        +printBanner()
+        +printTicketTable(List~Ticket~ tickets)
+        +printTicketDetails(Ticket ticket)
+        +printUsers(List~Customer~ c, List~Agent~ a)
+        +success(String msg)
+        +error(String msg)
     }
 
     User <|-- Customer : extends
@@ -328,6 +381,13 @@ classDiagram
 
     ConsoleApp --> TicketService
     ConsoleApp --> UserService
+    ConsoleApp o-- MenuSelector
+    ConsoleApp o-- InputReader
+    ConsoleApp o-- ConsoleView
+    MenuSelector <|.. ArrowKeyMenuSelector : implements
+    MenuSelector <|.. NumberedMenuSelector : implements
+    ArrowKeyMenuSelector --> InputReader
+    NumberedMenuSelector --> InputReader
 ```
 
 ### How to read the arrows
@@ -342,7 +402,7 @@ classDiagram
 
 ### Visibility symbols
 
-`-` private · `+` public · `#` protected · `*` after a method = abstract · `<<interface>>`, `<<abstract>>`, `<<enumeration>>` are **stereotypes** (labels for special kinds of class).
+`-` private · `+` public · `#` protected · `*` after a method = abstract · `$` = static · `<<interface>>`, `<<abstract>>`, `<<enumeration>>` are **stereotypes** (labels for special kinds of class).
 
 ---
 
@@ -510,6 +570,10 @@ sequenceDiagram
 
 ### 9.2 Update a ticket's status
 
+> The menu only **offers** the moves that `TicketStatus.nextStatuses()` allows, so a normal user can't
+> pick an illegal one. The check inside `Ticket.updateStatus()` still exists as the real safety net:
+> the UI is a convenience, the model is the rule. The diagram shows that safety net in action.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -575,7 +639,8 @@ sequenceDiagram
     M->>US: new UserService(userRepo)
     M->>TS: new TicketService(ticketRepo, userRepo, strategy, notifier)
     M->>US: registerCustomer / registerAgent (seed data)
-    M->>UI: new ConsoleApp(ticketService, userService)
+    M->>M: arrow keys supported? pick ArrowKeyMenuSelector or NumberedMenuSelector
+    M->>UI: new ConsoleApp(ticketService, userService, input, menu, view)
     M->>UI: start()
     loop until user chooses 0
         UI->>UI: print menu, read choice, call service
@@ -658,7 +723,10 @@ SOLID is five guidelines that make code easy to change without breaking it.
 
 | Class | Its single job | It changes only when... |
 |-------|----------------|-------------------------|
-| `ConsoleApp` | Read input, print output | The UI changes |
+| `ConsoleApp` | Flow of the app: which question to ask next | The menu flow changes |
+| `ConsoleView` | How things look: tables, colors, messages | The visual style changes |
+| `InputReader` | Reading keys and lines from the keyboard | The input source changes |
+| `ArrowKeyMenuSelector` | Arrow-key menu + terminal raw mode | Terminal handling changes |
 | `TicketService` | Ticket business rules | The rules change |
 | `InMemoryTicketRepository` | Store and fetch tickets | Storage changes |
 | `ConsoleNotificationService` | Deliver a message | The channel changes |
@@ -683,6 +751,9 @@ Then change one line in `Main`:
 ```java
 AssignmentStrategy assignmentStrategy = new LeastLoadedAssignmentStrategy();
 ```
+
+The same idea is used in the CLI: arrow-key menus and numbered menus are two implementations of
+`MenuSelector`. Adding the arrow-key UI did not change a single line of the service or model layers.
 
 ❌ **Violation would look like:** an `if (mode.equals("roundRobin")) ... else if (mode.equals("leastLoaded")) ...` inside `TicketService` that grows every time.
 
@@ -758,6 +829,10 @@ classDiagram
 | Strategy interface | `AssignmentStrategy` |
 | Concrete strategies | `RoundRobinAssignmentStrategy`, `LeastLoadedAssignmentStrategy` |
 
+**Second use of Strategy, in the CLI:** `MenuSelector` (interface) with `ArrowKeyMenuSelector` and
+`NumberedMenuSelector`. `Main` picks one at start-up depending on whether the terminal supports raw key
+input. `ConsoleApp` (the context) just calls `menu.select(...)` and never knows which one it got.
+
 ### 12.2 Repository pattern
 
 **Problem:** business code shouldn't care whether data lives in a `HashMap`, a file or PostgreSQL.
@@ -813,7 +888,13 @@ ticket-management-system/
 └── src/com/ticketsystem/
     ├── Main.java                     ← composition root (wiring)
     ├── cli/
-    │   └── ConsoleApp.java           ← menu loop, input/output
+    │   ├── ConsoleApp.java           ← app flow (what to ask next)
+    │   ├── ConsoleView.java          ← tables, colors, messages
+    │   ├── InputReader.java          ← reads lines/keys byte by byte
+    │   ├── InputEndedException.java  ← Ctrl+D / end of piped input
+    │   ├── MenuSelector.java         ← interface: pick one option
+    │   ├── ArrowKeyMenuSelector.java ← arrow keys + stty raw mode
+    │   └── NumberedMenuSelector.java ← fallback: type a number
     ├── service/
     │   ├── TicketService.java        ← ticket business rules
     │   └── UserService.java          ← register customers/agents
@@ -867,35 +948,75 @@ ticket-management-system/
 | `ConsoleNotificationService` | notification | class | Prints notifications | Realization |
 | `TicketService` | service | class | Create, assign, update, query tickets | SRP, DIP, composition |
 | `UserService` | service | class | Register and list users | SRP |
-| `ConsoleApp` | cli | class | Menu + input validation | SRP, separation of concerns |
+| `ConsoleApp` | cli | class | App flow: menu loop, asks questions, calls services | SRP, separation of concerns |
+| `ConsoleView` | cli | class | Tables, ticket card, colored messages | SRP |
+| `InputReader` | cli | class | Reads lines and single key bytes from the keyboard | SRP, encapsulation |
+| `InputEndedException` | cli | exception | Signals Ctrl+D / end of input so the app exits cleanly | Fail fast |
+| `MenuSelector` | cli | interface | "Pick one option" contract | Strategy, DIP |
+| `ArrowKeyMenuSelector` | cli | class | Up/Down/Enter menu using `stty` + ANSI codes | Strategy |
+| `NumberedMenuSelector` | cli | class | Type-a-number menu (works everywhere) | Strategy, LSP |
 | `Main` | root | class | Builds and wires everything | Dependency injection |
 
 ---
 
 ## 16. Sample Run
 
+In a real terminal the menus are driven with the arrow keys; after each choice the menu collapses
+into one line (`MAIN MENU: Create ticket`). Colors are not shown here.
+
 ```
-=== Ticket Management System ===
-Choose an option: 1
++==================================================+
+|            TICKET MANAGEMENT SYSTEM              |
+|      simple LLD project: SOLID + patterns        |
++==================================================+
+
+MAIN MENU: Create ticket
+
+== Create ticket ==
 Customer id: 1
+-> Raising a ticket for Rahul
 Title: Login not working
-Description: Cannot login since morning
-Priority (LOW/MEDIUM/HIGH): high
+Description (optional): Cannot login since morning
+Priority: HIGH
   [notify -> rahul@mail.com] Ticket #1 created and assigned to Amit
-Created: #1   Login not working   HIGH   OPEN   customer: Rahul   agent: Amit
+[OK] Ticket #1 created and assigned to Amit
++--------------------------------------------------+
+  Ticket #1  Login not working
++--------------------------------------------------+
+  Status      : OPEN
+  Priority    : HIGH
+  Customer    : Rahul (rahul@mail.com)
+  Agent       : Amit
+  Created     : 15:44:18
+  Updated     : 15:44:18
+  Description : Cannot login since morning
+  Can move to : [IN_PROGRESS]
++--------------------------------------------------+
 
-Choose an option: 2
-Ticket id: 1
-Current status: OPEN
-New status (OPEN/IN_PROGRESS/RESOLVED/CLOSED): CLOSED
-Error: Cannot move ticket from OPEN to CLOSED
+MAIN MENU: Update ticket status
 
-Choose an option: 2
+== Update ticket status ==
 Ticket id: 1
-Current status: OPEN
-New status (OPEN/IN_PROGRESS/RESOLVED/CLOSED): IN_PROGRESS
+-> Ticket #1 is currently OPEN
+Move ticket #1 to: IN_PROGRESS
   [notify -> rahul@mail.com] Ticket #1 moved from OPEN to IN_PROGRESS
-Updated: #1   Login not working   HIGH   IN_PROGRESS   customer: Rahul   agent: Amit
+[OK] Ticket #1 moved to IN_PROGRESS
+
+MAIN MENU: View all tickets
+
+== All tickets ==
++------+----------------------------+----------+-------------+------------+------------+----------+
+| ID   | Title                      | Priority | Status      | Customer   | Agent      | Updated  |
++------+----------------------------+----------+-------------+------------+------------+----------+
+| #1   | Login not working          | HIGH     | IN_PROGRESS | Rahul      | Amit       | 15:44:18 |
++------+----------------------------+----------+-------------+------------+------------+----------+
+1 ticket(s) | OPEN: 0 IN_PROGRESS: 1 RESOLVED: 0 CLOSED: 0
+
+MAIN MENU: Create ticket
+
+== Create ticket ==
+Customer id: 99
+[ERROR] Customer #99 not found
 ```
 
 ---
@@ -950,6 +1071,24 @@ other services and lives independently of `TicketService`.
 
 Add an `EscalationPolicy` interface (e.g. "HIGH tickets open > 2h get reassigned") and a scheduler
 that checks tickets periodically. Existing classes stay closed for modification.
+</details>
+
+<details>
+<summary><b>How do the arrow keys work without any library?</b></summary>
+
+A terminal normally buffers input until Enter ("canonical mode"). `ArrowKeyMenuSelector` runs
+`stty -icanon -echo` so each key arrives at once, reads the 3-byte escape sequence an arrow key sends
+(`ESC [ A` = up, `ESC [ B` = down), and redraws the menu with ANSI cursor codes. A `finally` block and
+a JVM shutdown hook always restore the terminal, even on Ctrl+C. Where this isn't possible
+(Windows, IDE console, piped input) `Main` plugs in `NumberedMenuSelector` instead: Strategy again.
+</details>
+
+<details>
+<summary><b>Why does the app read input byte by byte instead of using Scanner?</b></summary>
+
+`Scanner` buffers ahead, so it could swallow key presses meant for the arrow-key menu. One
+`InputReader` that reads unbuffered bytes is the single owner of the keyboard, so line input and
+key input never fight over the same bytes.
 </details>
 
 <details>
